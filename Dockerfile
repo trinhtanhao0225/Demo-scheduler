@@ -10,10 +10,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 4. Copy file danh sách thư viện
-COPY requirements.txt .
+COPY requirement.txt .
 
 # 5. Cài đặt thư viện (bao gồm ortools, fastapi, uvicorn)
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirement.txt
 
 # 6. Copy toàn bộ code vào thư mục /app
 COPY . .
