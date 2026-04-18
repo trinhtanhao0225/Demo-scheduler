@@ -16,7 +16,7 @@ import {
 import { useDroppable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 
-const API_URL = 'http://127.0.0.1:8000';
+const API_URL = 'https://demo-scheduler.onrender.com';
 
 const fakeData = {
   employees: [
