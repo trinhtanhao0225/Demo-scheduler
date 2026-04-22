@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-ortools
-pydantic
-pydantic-settings
-python-multipart
