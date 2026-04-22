@@ -1,44 +1,53 @@
-from typing import Dict, List
+from typing import Dict, List, Any
 from ortools.sat.python import cp_model
 import random
 
-
-def generate_or_validate_schedule(request, is_validation: bool = False) -> Dict:
+def generate_or_validate_schedule(request: Any, is_validation: bool = False) -> Dict:
+    """
+    Generates or validates a staff schedule.
+    Fixed Assignments and Days Off are treated as HARD constraints (highest priority).
+    """
     model = cp_model.CpModel()
 
-    shifts = ["M", "E", "N"]
+    # --- Basic Configuration ---
+    shifts = ["M", "E", "N"]  # Morning, Evening, Night
     days = list(range(request.num_days))
     min_staff = request.min_staff or {"M": 2, "E": 2, "N": 1}
 
+    # Shuffle employees to ensure variety in different runs
     employees = request.employees[:]
     random.shuffle(employees)
 
-    # ================= VARIABLES =================
+    # ================= 1. DECISION VARIABLES =================
+    # x[(employee_id, day, shift)] = 1 if assigned, 0 otherwise
     x = {}
     for emp in employees:
         for d in days:
             for s in shifts:
                 x[(emp.id, d, s)] = model.NewBoolVar(f"x_{emp.id}_{d}_{s}")
 
-    # ================= WEIGHTS =================
+    # ================= 2. PENALTY WEIGHTS (SOFT CONSTRAINTS) =================
+    # These are used for optimization when hard constraints are already met.
     WEIGHTS = {
-        "fixed": 10000,
-        "day_off": 10000,
-        "violation": 3000,
-        "min_staff": 100,
-        "workload": 2000,
-        "senior": 3000
+        "violation": 5000,   # Rules like N->M or multiple shifts per day
+        "workload": 2000,    # Exceeding 40h/week
+        "senior": 3000,      # Missing a senior on night shift
+        "min_staff": 500,    # Understaffing penalty
     }
 
     penalties = []
+    violation_msgs = []
 
-    # ================= VALIDATION =================
-    if is_validation and request.manual_schedule:
+    # ================= 3. HARD CONSTRAINTS (TOP PRIORITY) =================
+    
+    # CASE A: Validation Mode
+    # Force variables to match the provided manual schedule
+    if is_validation and hasattr(request, 'manual_schedule'):
         for d_str, day_data in request.manual_schedule.items():
             d_idx = int(d_str)
             for s in shifts:
-                shift_employees = day_data.get(s, []) if isinstance(day_data, dict) else getattr(day_data, s, [])
-                assigned_ids = [e.id if hasattr(e, 'id') else e.get('id') for e in shift_employees]
+                shift_employees = day_data.get(s, [])
+                assigned_ids = [e.get('id') if isinstance(e, dict) else e.id for e in shift_employees]
 
                 for emp in employees:
                     if emp.id in assigned_ids:
@@ -46,113 +55,102 @@ def generate_or_validate_schedule(request, is_validation: bool = False) -> Dict:
                     else:
                         model.Add(x[(emp.id, d_idx, s)] == 0)
 
-    # ================= CONSTRAINTS =================
-    if not is_validation and request.constraints:
+    # CASE B: Generation Mode
+    # Strictly enforce Fixed Assignments and Days Off
+    elif not is_validation and hasattr(request, 'constraints'):
         cons = request.constraints
-
+        
+        # MANDATORY WORKING DAYS (Fixed)
         for f in cons.fixed_assignments:
-            eid, d, s = f.employee_id, f.day, f.shift
-            if (eid, d, s) in x:
-                v = model.NewBoolVar(f"viol_fixed_{eid}_{d}_{s}")
-                model.Add(x[(eid, d, s)] == 1).OnlyEnforceIf(v.Not())
-                model.Add(x[(eid, d, s)] == 0).OnlyEnforceIf(v)
-                penalties.append(v * WEIGHTS["fixed"])
+            if (f.employee_id, f.day, f.shift) in x:
+                model.Add(x[(f.employee_id, f.day, f.shift)] == 1)
 
+        # MANDATORY DAYS OFF
         for off in cons.days_off:
-            eid, d, s = off.employee_id, off.day, off.shift
-            if (eid, d, s) in x:
-                v = model.NewBoolVar(f"viol_off_{eid}_{d}_{s}")
-                model.Add(x[(eid, d, s)] == 0).OnlyEnforceIf(v.Not())
-                model.Add(x[(eid, d, s)] == 1).OnlyEnforceIf(v)
-                penalties.append(v * WEIGHTS["day_off"])
+            if (off.employee_id, off.day, off.shift) in x:
+                model.Add(x[(off.employee_id, off.day, off.shift)] == 0)
 
-    # ================= LOGIC =================
-    violation_msgs = []
-
+    # ================= 4. BUSINESS LOGIC & PENALTIES =================
     for emp in employees:
-        # 1 shift per day
+        # Constraint: Maximum 1 shift per day
         for d in days:
-            total = sum(x[(emp.id, d, s)] for s in shifts)
+            daily_total = sum(x[(emp.id, d, s)] for s in shifts)
             v = model.NewBoolVar(f"v_daily_{emp.id}_{d}")
-            model.Add(total <= 1).OnlyEnforceIf(v.Not())
-            model.Add(total > 1).OnlyEnforceIf(v)
+            model.Add(daily_total <= 1).OnlyEnforceIf(v.Not())
+            model.Add(daily_total > 1).OnlyEnforceIf(v)
             penalties.append(v * WEIGHTS["violation"])
 
-        # N -> M rule
+        # Rest Rule: No Night shift (N) followed by a Morning shift (M) the next day
         for d in range(len(days) - 1):
-            nm = x[(emp.id, d, "N")] + x[(emp.id, d + 1, "M")]
+            nm_transition = x[(emp.id, d, "N")] + x[(emp.id, d + 1, "M")]
             v = model.NewBoolVar(f"v_nm_{emp.id}_{d}")
-            model.Add(nm <= 1).OnlyEnforceIf(v.Not())
-            model.Add(nm > 1).OnlyEnforceIf(v)
+            model.Add(nm_transition <= 1).OnlyEnforceIf(v.Not())
+            model.Add(nm_transition > 1).OnlyEnforceIf(v)
             penalties.append(v * WEIGHTS["violation"])
 
-        # MAX 40h (5 shifts)
+        # Workload: Max 5 shifts per period (e.g., 40 hours)
         MAX_SHIFTS = 5
-        total_shifts = sum(x[(emp.id, d, s)] for d in days for s in shifts)
+        total_worked = sum(x[(emp.id, d, s)] for d in days for s in shifts)
+        v_overwork = model.NewBoolVar(f"v_max_{emp.id}")
+        model.Add(total_worked <= MAX_SHIFTS).OnlyEnforceIf(v_overwork.Not())
+        model.Add(total_worked > MAX_SHIFTS).OnlyEnforceIf(v_overwork)
+        penalties.append(v_overwork * WEIGHTS["workload"])
+        violation_msgs.append((v_overwork, f"{emp.name}: Exceeds 40h workload"))
 
-        v = model.NewBoolVar(f"v_max_{emp.id}")
-        model.Add(total_shifts <= MAX_SHIFTS).OnlyEnforceIf(v.Not())
-        model.Add(total_shifts > MAX_SHIFTS).OnlyEnforceIf(v)
-
-        penalties.append(v * WEIGHTS["workload"])
-        violation_msgs.append((v, f"{emp.name}: exceeds 40 working hours"))
-
-    # ================= MIN STAFF =================
-    missing = {}
-
+    # Min Staffing Levels
+    missing_staff_vars = {}
     for d in days:
         for s in shifts:
-            missing[(d, s)] = model.NewIntVar(0, 10, f"miss_{d}_{s}")
             assigned = sum(x[(emp.id, d, s)] for emp in employees)
-            model.Add(assigned + missing[(d, s)] >= min_staff.get(s, 1))
-            penalties.append(missing[(d, s)] * WEIGHTS["min_staff"])
+            needed = min_staff.get(s, 1)
+            
+            # Use a slack variable to represent the number of missing staff
+            slack = model.NewIntVar(0, 10, f"slack_{d}_{s}")
+            model.Add(assigned + slack >= needed)
+            penalties.append(slack * WEIGHTS["min_staff"])
+            missing_staff_vars[(d, s)] = slack
 
-    # ================= SENIOR NIGHT =================
+    # Seniority Rule: At least 1 Senior per Night shift
     for d in days:
-        senior_night = sum(
-            x[(emp.id, d, "N")] for emp in employees if emp.is_senior
-        )
+        seniors_on_night = sum(x[(emp.id, d, "N")] for emp in employees if emp.is_senior)
+        v_senior = model.NewBoolVar(f"v_senior_{d}")
+        model.Add(seniors_on_night >= 1).OnlyEnforceIf(v_senior.Not())
+        model.Add(seniors_on_night == 0).OnlyEnforceIf(v_senior)
+        penalties.append(v_senior * WEIGHTS["senior"])
+        violation_msgs.append((v_senior, f"Day {d+1}: Night shift missing Senior"))
 
-        v = model.NewBoolVar(f"v_senior_night_{d}")
-        model.Add(senior_night >= 1).OnlyEnforceIf(v.Not())
-        model.Add(senior_night == 0).OnlyEnforceIf(v)
-
-        penalties.append(v * WEIGHTS["senior"])
-        violation_msgs.append((v, f"Day {d+1}: missing senior on night shift"))
-
-    # ================= RANDOM =================
+    # Add small random cost to vary the results across different runs
     for var in x.values():
-        penalties.append(var * random.randint(0, 2))
+        penalties.append(var * random.randint(0, 5))
 
-    # ================= OBJECTIVE =================
+    # ================= 5. SOLVER CONFIGURATION =================
     model.Minimize(sum(penalties))
 
-    # ================= SOLVER =================
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 5
-    solver.parameters.random_seed = random.randint(1, 100000)
+    solver.parameters.max_time_in_seconds = 10
     solver.parameters.num_search_workers = 8
-    solver.parameters.randomize_search = True
-
+    
     status = solver.Solve(model)
 
-    # ================= RESULT =================
+    # ================= 6. RESULT PROCESSING =================
     if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         messages = []
-
+        
+        # Collect soft constraint violation messages
         for v, msg in violation_msgs:
             if solver.Value(v):
                 messages.append(msg)
 
-        for (d, s), m in missing.items():
-            if solver.Value(m) > 0:
-                messages.append(f"Day {d+1}, shift {s}: missing {solver.Value(m)} staff")
+        for (d, s), slack in missing_staff_vars.items():
+            val = solver.Value(slack)
+            if val > 0:
+                messages.append(f"Day {d+1}, Shift {s}: Missing {val} staff")
 
+        # Build schedule JSON
         if is_validation:
             result_schedule = request.manual_schedule
         else:
             result_schedule = {str(d): {s: [] for s in shifts} for d in days}
-
             for (eid, d, s), var in x.items():
                 if solver.Value(var):
                     emp = next(e for e in employees if e.id == eid)
@@ -168,14 +166,14 @@ def generate_or_validate_schedule(request, is_validation: bool = False) -> Dict:
             "schedule": result_schedule,
             "statistics": {"shortage_details": messages},
             "total_cost_score": float(solver.ObjectiveValue()),
-            "message": "Success"
+            "message": "Schedule generated successfully"
         }
 
     return {
         "status": "error",
-        "message": "No feasible schedule found."
+        "message": "No feasible schedule found satisfying hard constraints (Fixed/Off)."
     }
 
-
 def generate_schedule(request) -> Dict:
+    """Wrapper function for generation"""
     return generate_or_validate_schedule(request, is_validation=False)
