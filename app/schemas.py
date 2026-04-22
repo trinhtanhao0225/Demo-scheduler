@@ -43,7 +43,7 @@ class GenerateScheduleRequest(BaseModel):
 
     # 🔥 QUAN TRỌNG (FIX LỖI CỦA BẠN)
     constraints: Optional[Constraints] = None
-
+    use_constraints: Optional[bool] = True
 
 # ================= RESPONSE =================
 class ScheduleResponse(BaseModel):
