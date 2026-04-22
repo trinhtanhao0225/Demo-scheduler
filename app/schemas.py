@@ -49,7 +49,7 @@ class GenerateScheduleRequest(BaseModel):
 class ScheduleResponse(BaseModel):
     schedule: Dict[str, Dict[str, List[EmployeeInShift]]]
     statistics: Dict[str, Any]
-    total_cost_score: float
-    message: str
     status: str = "success"
     preferred_shifts: Optional[Dict[str, List[int]]] = None
+    total_cost_score: Optional[float] = 0.0 
+    message: Optional[str] = None
