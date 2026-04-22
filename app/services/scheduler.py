@@ -157,3 +157,8 @@ def generate_or_validate_schedule(request: Any, is_validation: bool = False) -> 
         }
 
     return {"status": "error", "message": "Infeasible: Request conflicts with Hard Rules."}
+
+# Thêm đoạn này vào cuối file scheduler.py
+def generate_schedule(request) -> Dict:
+    # Hàm này gọi hàm chính với use_constraints lấy từ request
+    return generate_or_validate_schedule(request, is_validation=False)
