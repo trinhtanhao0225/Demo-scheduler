@@ -1,0 +1,17 @@
+  employees: [
+    {"id":"N1","name":"Alice Nguyen","role":"nurse","is_senior":true,"weekly_max_hours":40,"skills":["Injection","Wound Care"],"preferences":{"preferred_shifts":{"M":3,"E":2},"avoid_shifts":{"N":[5,6]}}},
+    {"id":"N2","name":"Bob Tran","role":"nurse","is_senior":true,"weekly_max_hours":40,"skills":["Injection","Emergency"],"preferences":{"preferred_shifts":{"E":4}}},
+    {"id":"N3","name":"Catherine Le","role":"nurse","is_senior":true,"weekly_max_hours":40,"skills":["Wound Care","IV Infusion"],"preferences":{}},
+    {"id":"N4","name":"Diana Pham","role":"nurse","is_senior":false,"weekly_max_hours":40,"skills":["Injection","Elderly Care"],"preferences":{"avoid_shifts":{"N":[0,1,2]}}},
+    {"id":"N5","name":"Edward Hoang","role":"nurse","is_senior":false,"weekly_max_hours":40,"skills":["Injection"],"preferences":{"preferred_shifts":{"M":4}}},
+    {"id":"C1","name":"Grace Vu","role":"caregiver","is_senior":true,"weekly_max_hours":40,"skills":["Bathing","Feeding"],"preferences":{"preferred_shifts":{"N":3}}},
+    {"id":"C2","name":"Henry Dang","role":"caregiver","is_senior":true,"weekly_max_hours":40,"skills":["Mobility Support"],"preferences":{}},
+    // {"id":"C3","name":"Lily Bui","role":"caregiver","is_senior":false,"weekly_max_hours":40,"skills":["Feeding","Bathing"],"preferences":{"avoid_shifts":{"M":[3,4]}}},
+    // {"id":"A1","name":"Luke Ly","role":"assistant","is_senior":false,"weekly_max_hours":40,"skills":["Cleaning","Meal Prep"],"preferences":{}},
+    // {"id":"A2","name":"Quinn Phan","role":"assistant","is_senior":false,"weekly_max_hours":40,"skills":["Documentation"],"preferences":{"preferred_shifts":{"E":3}}},
+    // {"id":"S1","name":"Ivy Le","role":"nurse","is_senior":false,"weekly_max_hours":40,"skills":["IV Infusion"],"preferences":{"preferred_shifts":{"N":2}}},
+    // {"id":"S2","name":"Victor Tran","role":"caregiver","is_senior":false,"weekly_max_hours":40,"skills":["Bathing"],"preferences":{}},
+    // {"id":"S3","name":"Sunny Nguyen","role":"assistant","is_senior":false,"weekly_max_hours":40,"skills":[],"preferences":{"avoid_shifts":{"N":[4,5,6]}}},
+    // {"id":"S4","name":"Yen Pham","role":"nurse","is_senior":false,"weekly_max_hours":40,"skills":["Wound Care"],"preferences":{}},
+    // {"id":"S5","name":"Lana Hoang","role":"caregiver","is_senior":false,"weekly_max_hours":40,"skills":["Feeding","Mobility Support"],"preferences":{"preferred_shifts":{"M":2}}}
+  ],
