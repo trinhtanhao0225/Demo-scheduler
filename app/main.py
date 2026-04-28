@@ -13,43 +13,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.post("/generate-schedule", response_model=ScheduleResponse)
 async def generate_schedule_api(req: GenerateScheduleRequest):
     try:
-        # --- 1. KIỂM TRA TRẠNG THÁI TỪ REQUEST ---
-        
-        # Có lịch kéo thả gửi lên không?
-        has_manual = bool(req.manual_schedule and len(req.manual_schedule) > 0)
-        
-        # Có yêu cầu dùng luật Xanh/Đỏ không?
-        use_rules = getattr(req, 'use_constraints', True)
+        # Xác định loại request
+        has_manual_schedule = bool(req.manual_schedule and len(req.manual_schedule) > 0)
+        use_constraints = getattr(req, 'use_constraints', True)
 
-        # --- 2. ĐIỀU HƯỚNG LOGIC ---
-
-        if has_manual:
-            # CHỨC NĂNG: VALIDATE & SYNC
-            # Ép AI kiểm tra lịch hiện tại + các ràng buộc
+        # ================== LOGIC ĐIỀU HƯỚNG RÕ RÀNG ==================
+        if has_manual_schedule:
+            # === MODE 1: VALIDATE lịch thủ công từ UI (kéo thả) ===
             result = generate_or_validate_schedule(req, is_validation=True)
-            
-        elif not use_rules:
-            # CHỨC NĂNG: RANDOM DRAFT
-            # AI tự làm mới hoàn toàn, bỏ qua các ô Xanh/Đỏ
-            result = generate_or_validate_schedule(req, is_validation=False)
-            
-        else:
-            # CHỨC NĂNG: APPLY CONSTRAINTS
-            # AI tự xếp lịch nhưng phải né ô Đỏ, giữ ô Xanh
+
+        elif not use_constraints:
+            # === MODE 2: RANDOM DRAFT (bỏ qua hết ràng buộc) ===
+            # Lưu ý: Nếu muốn thật sự random hoàn toàn, có thể cần chỉnh scheduler sau
             result = generate_or_validate_schedule(req, is_validation=False)
 
-        # Trả kết quả về cho React
+        else:
+            # === MODE 3: TẠO LỊCH THEO RÀNG BUỘC (Constraint-based) ===
+            result = generate_or_validate_schedule(req, is_validation=False)
+
+        # Trả về response (FastAPI sẽ tự validate với ScheduleResponse)
         return ScheduleResponse(**result)
 
     except Exception as e:
         import traceback
         print("--- SERVER ERROR LOG ---")
         print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=str(e))
-    
+        
+        # Trả về lỗi chi tiết hơn cho developer
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Schedule generation failed: {str(e)}"
+        )
+
+
 @app.get("/")
-def root():
-    return {"message": "API is running"}
+async def root():
+    return {
+        "message": "AI Scheduling System API is running",
+        "version": "1.0",
+        "endpoints": {
+            "generate_schedule": "/generate-schedule (POST)"
+        }
+    }
