@@ -49,3 +49,7 @@ async def generate_schedule_api(req: GenerateScheduleRequest):
         print("--- SERVER ERROR LOG ---")
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/")
+def root():
+    return {"message": "API is running"}
