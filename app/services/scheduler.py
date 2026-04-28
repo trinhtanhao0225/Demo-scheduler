@@ -6,9 +6,7 @@ import random
 def generate_or_validate_schedule(request: Any, is_validation: bool = False) -> Dict:
     """
     Core logic for AI scheduling system.
-    - is_validation = True: validate manually edited schedule from UI.
-    - use_rules = False: Random Draft mode (ignore constraints).
-    - use_rules = True: Constraint-based optimization mode.
+    - is_validation = True: validate manually edited schedule from UI + báo chi tiết vi phạm.
     """
     model = cp_model.CpModel()
 
@@ -17,7 +15,6 @@ def generate_or_validate_schedule(request: Any, is_validation: bool = False) -> 
     days = list(range(request.num_days))
     min_staff = request.min_staff or {"M": 2, "E": 2, "N": 1}
 
-    # Ensure employees is a safe list of objects
     raw_employees = request.employees[:]
     if not is_validation:
         random.shuffle(raw_employees)
@@ -35,186 +32,187 @@ def generate_or_validate_schedule(request: Any, is_validation: bool = False) -> 
 
     # --- 3. PENALTY WEIGHTS ---
     WEIGHTS = {
-        "violation": 10000,   # critical violations
-        "senior": 5000,       # missing senior at night shift
-        "workload": 3000,     # overworking
-        "min_staff": 1000,    # staffing shortage
+        "violation": 10000,   # critical violations (double shift, night→morning)
+        "senior": 5000,
+        "workload": 3000,
+        "min_staff": 1000,
     }
 
-    penalties = []
-    violation_msgs = []
+    violations = []          # List of violation messages (for validation mode)
+    penalty_terms = []
 
-    # --- 4. HARD CONSTRAINTS ---
+    # --- 4. HARD CONSTRAINTS (luôn áp dụng) ---
 
-    # A. Rule Builder constraints (UI settings)
     use_rules = getattr(request, 'use_constraints', True)
+
+    # A. Fixed assignments & Days off từ Rule Builder
     if use_rules and hasattr(request, 'constraints') and request.constraints:
         cons = request.constraints
 
         for f in getattr(cons, 'fixed_assignments', []):
-            if (f.employee_id, f.day, f.shift) in x:
-                model.Add(x[(f.employee_id, f.day, f.shift)] == 1)
+            key = (f.employee_id, f.day, f.shift)
+            if key in x:
+                model.Add(x[key] == 1)
 
         for off in getattr(cons, 'days_off', []):
-            if (off.employee_id, off.day, off.shift) in x:
-                model.Add(x[(off.employee_id, off.day, off.shift)] == 0)
+            key = (off.employee_id, off.day, off.shift)
+            if key in x:
+                model.Add(x[key] == 0)
 
-    # B. Manual drag-and-drop schedule validation
+    # B. Manual schedule validation (drag & drop từ UI)
     if is_validation and hasattr(request, 'manual_schedule') and request.manual_schedule:
         for d_str, day_data in request.manual_schedule.items():
-            d_idx = int(d_str)
+            d = int(d_str)
             for s in shifts:
                 shift_employees = day_data.get(s, [])
-
-                assigned_ids = [
-                    e.get('id') if isinstance(e, dict) else getattr(e, 'id')
+                assigned_ids = {
+                    e.get('id') if isinstance(e, dict) else get_attr(e, 'id')
                     for e in shift_employees
-                ]
+                }
 
                 for emp in raw_employees:
                     eid = get_attr(emp, 'id')
+                    model.Add(x[(eid, d, s)] == (1 if eid in assigned_ids else 0))
 
-                    if eid in assigned_ids:
-                        model.Add(x[(eid, d_idx, s)] == 1)
-                    else:
-                        model.Add(x[(eid, d_idx, s)] == 0)
+    # --- 5. BUSINESS RULES ---
 
-    # --- 5. BUSINESS RULES (HEALTHCARE LOGIC) ---
     for emp in raw_employees:
         eid = get_attr(emp, 'id')
         ename = get_attr(emp, 'name', "Unknown")
         is_senior = get_attr(emp, 'is_senior', False)
 
+        # 1. No double shift per day
         for d in days:
-            # 1. No double shift per day
             daily_total = sum(x[(eid, d, s)] for s in shifts)
-            v = model.NewBoolVar(f"v_daily_{eid}_{d}")
+            v = model.NewBoolVar(f"v_double_{eid}_{d}")
 
             model.Add(daily_total <= 1).OnlyEnforceIf(v.Not())
             model.Add(daily_total > 1).OnlyEnforceIf(v)
 
-            penalties.append(v * WEIGHTS["violation"])
+            penalty_terms.append(v * WEIGHTS["violation"])
 
             if is_validation:
-                violation_msgs.append((v, f"{ename}: works 2 shifts on day {d+1}"))
+                violations.append((v, f"{ename} làm 2 ca trong cùng 1 ngày (Ngày {d+1})"))
 
         # 2. Rest constraint: Night → Morning forbidden
         for d in range(len(days) - 1):
-            nm_transition = x[(eid, d, "N")] + x[(eid, d + 1, "M")]
+            nm = x[(eid, d, "N")] + x[(eid, d + 1, "M")]
             v = model.NewBoolVar(f"v_nm_{eid}_{d}")
 
-            model.Add(nm_transition <= 1).OnlyEnforceIf(v.Not())
-            model.Add(nm_transition > 1).OnlyEnforceIf(v)
+            model.Add(nm <= 1).OnlyEnforceIf(v.Not())
+            model.Add(nm > 1).OnlyEnforceIf(v)
 
-            penalties.append(v * WEIGHTS["violation"])
+            penalty_terms.append(v * WEIGHTS["violation"])
 
             if is_validation:
-                violation_msgs.append(
-                    (v, f"{ename}: Night shift followed by Morning shift (Day {d+1}-{d+2})")
-                )
+                violations.append((v, f"{ename}: Ca đêm (Ngày {d+1}) → Ca sáng (Ngày {d+2}) - Vi phạm nghỉ ngơi"))
 
-        # 3. Max 5 shifts per week (~40 hours)
-        total_worked = sum(x[(eid, d, s)] for d in days for s in shifts)
-        v_overwork = model.NewBoolVar(f"v_max_{eid}")
+        # 3. Max 5 shifts per week
+        total_shifts = sum(x[(eid, d, s)] for d in days for s in shifts)
+        v_over = model.NewBoolVar(f"v_over_{eid}")
 
-        model.Add(total_worked <= 5).OnlyEnforceIf(v_overwork.Not())
-        model.Add(total_worked > 5).OnlyEnforceIf(v_overwork)
+        model.Add(total_shifts <= 5).OnlyEnforceIf(v_over.Not())
+        model.Add(total_shifts > 5).OnlyEnforceIf(v_over)
 
-        penalties.append(v_overwork * WEIGHTS["workload"])
+        penalty_terms.append(v_over * WEIGHTS["workload"])
 
         if is_validation:
-            violation_msgs.append((v_overwork, f"{ename}: exceeds 40 hours per week"))
+            violations.append((v_over, f"{ename}: Làm quá 5 ca/tuần (hiện tại {total_shifts})"))
 
-    # 4. Minimum staffing requirement per shift
-    missing_staff_vars = {}
-
+    # 4. Minimum staffing
+    missing_staff = {}
     for d in days:
         for s in shifts:
             assigned = sum(x[(get_attr(e, 'id'), d, s)] for e in raw_employees)
             needed = min_staff.get(s, 1)
 
-            slack = model.NewIntVar(0, 10, f"slack_{d}_{s}")
+            slack = model.NewIntVar(0, 20, f"slack_{d}_{s}")
             model.Add(assigned + slack >= needed)
 
-            penalties.append(slack * WEIGHTS["min_staff"])
-            missing_staff_vars[(d, s)] = slack
+            penalty_terms.append(slack * WEIGHTS["min_staff"])
+            missing_staff[(d, s)] = slack
 
-    # 5. At least one senior at night shift
+    # 5. Senior on Night shift
     for d in days:
-        seniors_on_night = sum(
+        senior_night = sum(
             x[(get_attr(e, 'id'), d, "N")]
-            for e in raw_employees
-            if get_attr(e, 'is_senior', False)
+            for e in raw_employees if get_attr(e, 'is_senior', False)
         )
-
         v_senior = model.NewBoolVar(f"v_senior_{d}")
 
-        model.Add(seniors_on_night >= 1).OnlyEnforceIf(v_senior.Not())
-        model.Add(seniors_on_night == 0).OnlyEnforceIf(v_senior)
+        model.Add(senior_night >= 1).OnlyEnforceIf(v_senior.Not())
+        model.Add(senior_night == 0).OnlyEnforceIf(v_senior)
 
-        penalties.append(v_senior * WEIGHTS["senior"])
+        penalty_terms.append(v_senior * WEIGHTS["senior"])
 
         if is_validation:
-            violation_msgs.append((v_senior, f"Day {d+1}: Missing senior staff on night shift"))
+            violations.append((v_senior, f"Ngày {d+1}: Không có nhân viên senior ca đêm (N)"))
 
-    # Randomness for draft mode
+    # --- 6. Random noise (chỉ khi không validate) ---
     if not is_validation:
         for var in x.values():
-            penalties.append(var * random.randint(0, 5))
+            penalty_terms.append(var * random.randint(0, 5))
 
-    # --- 6. SOLVER ---
-    model.Minimize(sum(penalties))
+    # --- 7. OBJECTIVE ---
+    model.Minimize(sum(penalty_terms))
 
+    # --- 8. SOLVER ---
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = 8.0 if not is_validation else 3.0
-
+    solver.parameters.max_time_in_seconds = 3.0 if is_validation else 8.0
     status = solver.Solve(model)
 
-    # --- 7. OUTPUT ---
-    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        messages = []
+    # --- 9. RESULT ---
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return {
+            "status": "error",
+            "message": "Không tìm thấy giải pháp hợp lệ.",
+            "schedule": None,
+            "violations": ["Solver failed"],
+            "total_cost_score": 0.0
+        }
 
-        for v, msg in violation_msgs:
-            if solver.Value(v):
-                messages.append(msg)
+    # Thu thập các vi phạm thực tế
+    actual_violations = []
+    for v, msg in violations:
+        if solver.Value(v) == 1:
+            actual_violations.append(msg)
 
-        for (d, s), slack in missing_staff_vars.items():
-            if solver.Value(slack) > 0:
-                messages.append(f"Day {d+1}, Shift {s}: shortage {solver.Value(slack)} staff")
+    # Shortage details
+    shortage_details = []
+    for (d, s), slack_var in missing_staff.items():
+        slack = solver.Value(slack_var)
+        if slack > 0:
+            shortage_details.append(f"Ngày {d+1}, ca {s}: Thiếu {slack} người")
 
-        if is_validation:
-            result_schedule = request.manual_schedule
-        else:
-            result_schedule = {str(d): {s: [] for s in shifts} for d in days}
-
-            for (eid, d, s), var in x.items():
-                if solver.Value(var):
-                    emp = next(e for e in raw_employees if get_attr(e, 'id') == eid)
-
+    if is_validation:
+        result_schedule = request.manual_schedule
+        message = "Đã kiểm tra lịch thủ công. " + ("Có vi phạm!" if actual_violations else "Lịch hợp lệ.")
+    else:
+        # Build schedule from solver (giữ nguyên logic cũ của bạn)
+        result_schedule = {str(d): {s: [] for s in shifts} for d in days}
+        for (eid, d, s), var in x.items():
+            if solver.Value(var):
+                emp = next((e for e in raw_employees if get_attr(e, 'id') == eid), None)
+                if emp:
                     result_schedule[str(d)][s].append({
                         "id": eid,
                         "name": get_attr(emp, 'name'),
                         "role": get_attr(emp, 'role'),
                         "is_senior": get_attr(emp, 'is_senior', False)
                     })
-
-        return {
-            "status": "success",
-            "schedule": result_schedule,
-            "statistics": {"shortage_details": list(set(messages))},
-            "total_cost_score": float(solver.ObjectiveValue()),
-            "message": "Optimization completed"
-        }
+        message = "Tạo lịch thành công"
 
     return {
-        "status": "error",
-        "message": "No feasible solution found under current constraints.",
-        "total_cost_score": 0.0,
-        "schedule": None,
-        "statistics": {"shortage_details": ["Solver failed to find a valid solution"]}
+        "status": "success",
+        "schedule": result_schedule,
+        "violations": actual_violations,                    # <-- Quan trọng nhất khi validate
+        "shortage_details": shortage_details,
+        "total_cost_score": float(solver.ObjectiveValue()),
+        "message": message,
+        "is_valid": len(actual_violations) == 0 and len(shortage_details) == 0
     }
 
 
 def generate_schedule(request: Any) -> Dict:
-    """Wrapper for legacy API compatibility"""
+    """Wrapper cho API cũ"""
     return generate_or_validate_schedule(request, is_validation=False)
